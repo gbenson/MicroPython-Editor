@@ -1402,7 +1402,7 @@ def pye_edit(content, tab_size=4, undo=50, io_device=None):
 
         except Exception as err:
             slot[index].message = "{!r}".format(err)
-            ## raise  ## remove the comment to trace bugs
+            raise  ## remove the comment to trace bugs
     ## All windows closed, clean up
     Editor.yank_buffer = []
     ## close
