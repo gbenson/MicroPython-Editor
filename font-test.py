@@ -23,8 +23,8 @@ def load_font(path, size):
 
     assert not hasattr(font, "width")
     assert not hasattr(font, "height")
-    font.width = max_x - min_x
-    font.height = max_y - min_y
+    font.width = max_x - min_x + 1
+    font.height = max_y - min_y + 1
 
     assert not hasattr(font, "offset")
     font.offset = (-min_x, -min_y)
