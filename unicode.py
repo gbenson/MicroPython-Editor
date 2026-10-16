@@ -4,6 +4,31 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from PIL import Image, ImageDraw, ImageFont
+
+FONT_PATH = "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+FONT_SIZE = 20
+
+
+def load_font(path, size):
+    font = ImageFont.truetype(font=path, size=size)
+
+    boxes = [font.getbbox(chr(c)) for c in range(32, 256)]
+    min_x = min(box[0] for box in boxes)
+    min_y = min(box[1] for box in boxes)
+    max_x = max(box[2] for box in boxes)
+    max_y = max(box[3] for box in boxes)
+
+    assert not hasattr(font, "width")
+    assert not hasattr(font, "height")
+    font.width = max_x - min_x + 1
+    font.height = max_y - min_y + 1
+
+    assert not hasattr(font, "offset")
+    font.offset = (-min_x, -min_y)
+
+    return font
+
 
 @dataclass
 class RangeMaker:
@@ -36,7 +61,19 @@ class RangeMaker:
     #  - Basic Latin           = 95 glyphs; 95*88 = 8,360 bytes
     #  - Latin-1 Supplement = also 95 glyphs = also 8,360 bytes
 
-    def _cull(self, *, cutoff: int = 4) -> None:
+
+    # no cutoff =>  661 glyphs in 185 ranges, 56 KiB
+    #  cutoff=1 =>  678 glyphs in 151 ranges, 58 KiB
+    #  cutoff=2 =>  688 glyphs in 141 ranges, 59 KiB
+    #  cutoff=3 =>  736 glyphs in 109 ranges, 63 KiB
+    #  cutoff=4 =>  740 glyphs in 107 ranges, 63 KiB
+    #  cutoff=5 =>  765 glyphs in  97 ranges, 65 KiB
+    #  cutoff=7 =>  814 glyphs in  83 ranges, 69 KiB
+    #  cutoff=9 =>  865 glyphs in  71 ranges, 74 KiB
+    # cutoff=20 => 1029 glyphs in  49 ranges, 88 KiB
+    # cutoff=31 => 1133 glyphs in  41 ranges, 97 KiB
+
+    def _cull(self, *, cutoff: int = 31) -> None:
         print = lambda *args: None   # XXX
         thresholds = self._thresholds
         i = 0
@@ -87,41 +124,98 @@ class RangeMaker:
 
 
 def is_east_asian(c: str) -> bool:
-    return unicodedata.east_asian_width(c) in "FHW"
+    if unicodedata.east_asian_width(c) in "FHW":
+        return True
+
+    # https://en.wikipedia.org/wiki/Plane_(Unicode)#Basic_Multilingual_Plane
+    # calls these "CJK scripts and symbols".  Stripping them drops 9 glyphs
+    # and 4 ranges.
+    # ranges.
+    # if ord(c) in range(0x2e80, 0xa000):
+    #     return True
+
+    return False
 
 
 def is_right_to_left(c: str) -> bool:
-    return unicodedata.bidirectional(c) in {"R", "AL"}
+    if unicodedata.bidirectional(c) in {"R", "AL"}:
+        return True
+
+    # https://en.wikipedia.org/wiki/Plane_(Unicode)#Basic_Multilingual_Plane
+    # calls these "Semitic abjads and other right-to-left scripts", but they
+    # aren't obviously right-to-left.  Stripping them loses 50 glyphs and 14
+    # ranges.
+    # if ord(c) in range(0x0590, 0x0900):
+    #     return True
+
+    return False
 
 
 def is_standalone(c: str) -> bool:
     return unicodedata.combining(c) == 0
 
 
-_EXCLUDE_BLOCKS = {
-    "IPA Extensions",               # dictionary corner
-    "Spacing Modifier Letters",     # ditto
-}
-
-def probably_not_useful(c: str) -> bool:
-    cp = ord(c)
-    if cp > 0x0530:
-        if cp < 0x2000:
-            return True  # so many languages I'll never know
-        if cp >= 0x2c00:
-            return True
-        if cp >= 0x2800:
-            # XXX there might be some userful stuff here,
-            # but dropping the lot loses 1024 glyphs, so
-            # 88 KiB if glyphs are 88 bytes each.
-            return True
-        # fall through for arrows/symbols/graphics/etc
-
+def is_supported(c: str) -> bool:
     block = unicodedata.block(c)
     if block.startswith("Combining "):
-        return True  # we don't handle combination
+        return False  # we don't handle combination
 
-    return block in _EXCLUDE_BLOCKS
+    return True
+
+
+FONT = load_font(FONT_PATH, FONT_SIZE)
+SCRATCH_SIZE = (FONT.width * 5, FONT.height * 5)
+SCRATCH_L = FONT.width * 2
+SCRATCH_R = FONT.width * 3 - 1
+SCRATCH_T = FONT.height * 2
+SCRATCH_B = FONT.height * 3 - 1
+SCRATCH_BBOX = (SCRATCH_L, SCRATCH_T, SCRATCH_R, SCRATCH_B)
+SCRATCH_CROP = (SCRATCH_L, SCRATCH_T, SCRATCH_R + 1, SCRATCH_B + 1)
+GLYPH_XY = tuple(p + o for p, o in zip(SCRATCH_BBOX[:2], FONT.offset))
+
+
+def make_glyph(c: str) -> list[int]:
+    img = Image.new("L", SCRATCH_SIZE)
+    draw = ImageDraw.Draw(img)
+    draw.text(GLYPH_XY, c, fill=255, font=FONT)
+
+    # check it doesn't overflow by more than a couple pixels
+    bbox = img.getbbox()
+    if bbox is None:
+        return None
+    l, t, r, b = bbox
+    ofl = max(0, SCRATCH_L - l)
+    ofr = max(0, r - SCRATCH_R)
+    oft = max(0, SCRATCH_T - t)
+    ofb = max(0, b - SCRATCH_B)
+    if any(overflow > 2 for overflow in (ofl, oft, ofr, ofb)):
+        raise ValueError(f"U+{ord(c):04X} {c!r}:", bbox, "overflows", SCRATCH_BBOX)
+
+    img = img.crop(SCRATCH_CROP)
+    assert img.width == FONT.width
+    assert img.height == FONT.height
+    assert img.width < 16
+
+    #img.save("glyph.png")
+    pixels = bytes(img.get_flattened_data())
+    #print(ord(c), ":", pixels)
+    pixel_iter = iter(pixels)
+    glyph = []
+    for y in range(img.height):
+        row = 0
+        for x in range(img.width):
+            row <<= 2
+            row |= (next(pixel_iter) >> 6)
+        glyph.append(row)
+
+    if not any(glyph):
+        return None  # blank
+
+    return glyph
+
+
+BLANK = make_glyph(" ")
+UNPRINTABLE = make_glyph("\uFFFD")
 
 
 def should_include(c: str) -> bool:
@@ -140,14 +234,23 @@ def should_include(c: str) -> bool:
     if not is_standalone(c):
         return False
 
-    if probably_not_useful(c):
+    if not is_supported(c):
         return False
 
-    #if not unicodedata.is_normalized("NFC", c):
-    #    print(f"U+{ord(c):04X} {c!r}")
+    glyph = make_glyph(c)
+    #assert glyph is not None
+    if glyph == UNPRINTABLE:
+        #print(f"U+{ord(c):04X} {c!r} is unprintable!")
+        return False
 
-    return True
+    if glyph is None:
+        print(f"U+{ord(c):04X} {c!r}: glyph is None")
+    elif glyph == BLANK:
+        print(f"U+{ord(c):04X} {c!r}: glyph is blank")
+    else:
+        return True
 
+    exit()
 
 
 def main():
