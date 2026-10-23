@@ -6,14 +6,16 @@ from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageFont
 
-FONT_PATH = "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
-FONT_SIZE = 20
-
+FONT_NAME = "Noto Sans Mono Regular"
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/NotoSansMonoRegular.ttf"
+FONT_SIZE = 15
 
 def load_font(path, size):
     font = ImageFont.truetype(font=path, size=size)
 
-    boxes = [font.getbbox(chr(c)) for c in range(32, 256)]
+    # Get bounds from "Box Drawing" and "Block Elements" ranges.
+    boxes = [font.getbbox(chr(c)) for c in range(0x2500, 0x25A0)]
+
     min_x = min(box[0] for box in boxes)
     min_y = min(box[1] for box in boxes)
     max_x = max(box[2] for box in boxes)
